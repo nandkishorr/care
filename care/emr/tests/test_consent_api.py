@@ -306,6 +306,20 @@ class TestConsentViewSet(CareAPITestBase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["verification_details"]), 2)
 
+    def test_add_verification_without_permissions(self):
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        url = f"{self._get_consent_url(consent.external_id)}add_verification/"
+        data = {
+            "verified": True,
+            "verification_type": "validation",
+            "note": "Test note",
+        }
+        response = self.client.post(url, data, format="json")
+        self.assertEqual(response.status_code, 403)
+
     def test_remove_verification(self):
         permissions = [
             PatientPermissions.can_view_clinical_data.name,
@@ -347,6 +361,27 @@ class TestConsentViewSet(CareAPITestBase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["verification_details"]), 0)
+
+    def test_remove_verification_without_adding_verification(self):
+        permissions = [
+            PatientPermissions.can_view_clinical_data.name,
+            EncounterPermissions.can_write_encounter.name,
+        ]
+        role = self.create_role_with_permissions(permissions)
+        self.attach_role_facility_organization_user(self.organization, self.user, role)
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        url = self._get_consent_url(consent.external_id)
+        remove_verification_url = f"{url}remove_verification/"
+        # Attempting to remove verification without adding one
+        response = self.client.post(
+            remove_verification_url,
+            {"verified_by": self.user.external_id},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
 
     def test_for_attachments(self):
         permissions = [
