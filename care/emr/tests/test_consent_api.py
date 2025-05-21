@@ -27,7 +27,6 @@ class TestConsentViewSet(CareAPITestBase):
         self.organization = self.create_facility_organization(facility=self.facility)
         self.patient = self.create_patient()
         self.client.force_authenticate(user=self.user)
-
         self.base_url = reverse(
             "consent-list", kwargs={"patient_external_id": self.patient.external_id}
         )
@@ -267,41 +266,118 @@ class TestConsentViewSet(CareAPITestBase):
         delete_response = self.client.delete(url, {}, format="json")
         self.assertEqual(delete_response.status_code, 403)
 
-    def test_add_verification(self):
-        permissions = [
+
+class TestConsentVerificationViewSet(CareAPITestBase):
+    def setUp(self):
+        super().setUp()
+        self.user = self.create_user()
+        self.facility = self.create_facility(user=self.user)
+        self.organization = self.create_facility_organization(facility=self.facility)
+        self.patient = self.create_patient()
+        self.client.force_authenticate(user=self.user)
+        self.base_url = reverse(
+            "consent-list", kwargs={"patient_external_id": self.patient.external_id}
+        )
+        self.permissions = [
             PatientPermissions.can_view_clinical_data.name,
             EncounterPermissions.can_write_encounter.name,
         ]
-        role = self.create_role_with_permissions(permissions)
-        self.attach_role_facility_organization_user(self.organization, self.user, role)
-
-        encounter = self.create_encounter(
-            patient=self.patient, facility=self.facility, organization=self.organization
-        )
-        consent = self.create_consent(encounter=encounter)
-
-        url = f"{self._get_consent_url(consent.external_id)}add_verification/"
-        data = {
+        self.data = {
             "verified": True,
             "verification_type": "validation",
             "note": "Test note",
         }
 
-        # First verification attempt
-        self.assertEqual(self.client.post(url, data, format="json").status_code, 200)
+    def _get_consent_url(self, consent_id):
+        return reverse(
+            "consent-detail",
+            kwargs={
+                "patient_external_id": self.patient.external_id,
+                "external_id": consent_id,
+            },
+        )
+
+    def create_consent(self, encounter, **kwargs):
+        data = self.generate_data_for_consent(encounter, **kwargs)
+        data.pop("encounter")
+        return baker.make(Consent, encounter=encounter, **data)
+
+    def generate_data_for_consent(self, encounter, **kwargs):
+        start = self.fake.date_time_this_year(
+            tzinfo=timezone(timedelta(hours=5, minutes=30))
+        )
+        end = start + timedelta(days=1)
+        date = start
+
+        data = {
+            "encounter": encounter.external_id,
+            "status": choice(list(ConsentStatusChoices)).value,
+            "category": choice(list(CategoryChoice)).value,
+            "date": date.isoformat(),
+            "decision": choice(list(DecisionType)).value,
+            "period": {"start": start.isoformat(), "end": end.isoformat()},
+            "note": self.fake.text(),
+        }
+        data.update(**kwargs)
+        return data
+
+    def setup_user_with_permissions(self, user=None, permissions=None):
+        if user is None:
+            user = self.user
+        if permissions is None:
+            permissions = self.permissions
+
+        self.role = self.create_role_with_permissions(permissions)
+        self.attach_role_facility_organization_user(self.organization, user, self.role)
+        return user, self.role
+
+    def add_verification(self, consent):
+        url = f"{self._get_consent_url(consent.external_id)}add_verification/"
+        self.assertEqual(
+            self.client.post(url, self.data, format="json").status_code, 200
+        )
+
+    def test_add_verification(self):
+        self.setup_user_with_permissions()
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        self.add_verification(consent)
+
+    def test_add_verification_with_duplicate_attempt(self):
+        self.setup_user_with_permissions()
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        url = f"{self._get_consent_url(consent.external_id)}add_verification/"
+        self.assertEqual(
+            self.client.post(url, self.data, format="json").status_code, 200
+        )
 
         # Duplicate verification attempt
-        response = self.client.post(url, data, format="json")
+        response = self.client.post(url, self.data, format="json")
         self.assertEqual(response.status_code, 400)
         error = response.json()["errors"][0]
         self.assertEqual(error["type"], "validation_error")
         self.assertIn("Consent is already verified by the user", error["msg"])
 
+    def test_add_verification_by_another_user(self):
+        self.setup_user_with_permissions()
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        url = f"{self._get_consent_url(consent.external_id)}add_verification/"
+        self.add_verification(consent)
         # Verification by another user
         user_2 = self.create_user()
         self.client.force_authenticate(user_2)
-        self.attach_role_facility_organization_user(self.organization, user_2, role)
-        response = self.client.post(url, data, format="json")
+        self.attach_role_facility_organization_user(
+            self.organization, user_2, self.role
+        )
+        response = self.client.post(url, self.data, format="json")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(response.json()["verification_details"]), 2)
@@ -312,63 +388,41 @@ class TestConsentViewSet(CareAPITestBase):
         )
         consent = self.create_consent(encounter=encounter)
         url = f"{self._get_consent_url(consent.external_id)}add_verification/"
-        data = {
-            "verified": True,
-            "verification_type": "validation",
-            "note": "Test note",
-        }
-        response = self.client.post(url, data, format="json")
+        response = self.client.post(url, self.data, format="json")
         self.assertEqual(response.status_code, 403)
 
-    def test_remove_verification(self):
-        permissions = [
-            PatientPermissions.can_view_clinical_data.name,
-            EncounterPermissions.can_write_encounter.name,
-        ]
-        role = self.create_role_with_permissions(permissions)
-        self.attach_role_facility_organization_user(self.organization, self.user, role)
-
+    def test_remove_verification_actual_user(self):
+        self.setup_user_with_permissions()
         encounter = self.create_encounter(
             patient=self.patient, facility=self.facility, organization=self.organization
         )
         consent = self.create_consent(encounter=encounter)
-
-        url = self._get_consent_url(consent.external_id)
-        add_verification_url = f"{url}add_verification/"
-        remove_verification_url = f"{url}remove_verification/"
-
-        data = {"verified": True, "verification_type": "validation"}
-
-        # Adding verification
-        self.assertEqual(
-            self.client.post(add_verification_url, data, format="json").status_code, 200
-        )
-
-        # Attempting to remove verification with a random UUID
+        self.add_verification(consent)
+        url = f"{self._get_consent_url(consent.external_id)}remove_verification/"
+        # Removing verification by the actual user
         response = self.client.post(
-            remove_verification_url, {"verified_by": uuid.uuid4()}, format="json"
+            url, {"verified_by": self.user.external_id}, format="json"
         )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json()["verification_details"]), 0)
+
+    def test_remove_verification_by_random_uuid(self):
+        self.setup_user_with_permissions()
+        encounter = self.create_encounter(
+            patient=self.patient, facility=self.facility, organization=self.organization
+        )
+        consent = self.create_consent(encounter=encounter)
+        self.add_verification(consent)
+        url = f"{self._get_consent_url(consent.external_id)}remove_verification/"
+        # Attempting to remove verification with a random UUID
+        response = self.client.post(url, {"verified_by": uuid.uuid4()}, format="json")
         self.assertEqual(response.status_code, 400)
         error = response.json()["errors"][0]
         self.assertEqual(error["type"], "validation_error")
         self.assertIn("Consent is not verified by the user", error["msg"])
 
-        # Removing verification by the actual user
-        response = self.client.post(
-            remove_verification_url,
-            {"verified_by": self.user.external_id},
-            format="json",
-        )
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["verification_details"]), 0)
-
     def test_remove_verification_without_adding_verification(self):
-        permissions = [
-            PatientPermissions.can_view_clinical_data.name,
-            EncounterPermissions.can_write_encounter.name,
-        ]
-        role = self.create_role_with_permissions(permissions)
-        self.attach_role_facility_organization_user(self.organization, self.user, role)
+        self.setup_user_with_permissions()
         encounter = self.create_encounter(
             patient=self.patient, facility=self.facility, organization=self.organization
         )
@@ -382,6 +436,9 @@ class TestConsentViewSet(CareAPITestBase):
             format="json",
         )
         self.assertEqual(response.status_code, 400)
+        error = response.json()["errors"][0]
+        self.assertEqual(error["type"], "validation_error")
+        self.assertIn("Consent is not verified by the user", error["msg"])
 
     def test_for_attachments(self):
         permissions = [
